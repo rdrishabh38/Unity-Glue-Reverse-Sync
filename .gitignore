@@ -1,0 +1,17 @@
+# Spark / Hadoop
+metastore_db/
+spark-warehouse/
+derby.log
+
+# Python / Jupyter
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# IDEs
+.idea/
+.vscode/
+
+# Other temporary files
+*.tmp
+*.log

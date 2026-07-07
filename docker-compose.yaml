@@ -1,0 +1,89 @@
+services:
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+
+  iceberg-rest:
+    image: tabulario/iceberg-rest:latest
+    container_name: iceberg-rest
+    ports:
+      - "8181:8181"
+    environment:
+      - CATALOG_WAREHOUSE=s3a://lakehouse-bucket/central_warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://localstack:4566
+      - CATALOG_S3_PATH__STYLE__ACCESS=true
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+    depends_on:
+      - localstack
+
+  unity-catalog-server:
+    image: unitycatalog/unitycatalog:latest
+    container_name: unity-catalog-server
+    ports:
+      - "8080:8080"
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+    volumes:
+      - ./unity_server.properties:/home/unitycatalog/etc/conf/server.properties
+
+  unity-catalog-ui:
+    build:
+      context: https://github.com/unitycatalog/unitycatalog.git#main:ui
+      dockerfile: Dockerfile
+      args:
+        PROXY_HOST: unity-catalog-server
+    container_name: unity-catalog-ui
+    ports:
+      - "3000:3000"
+    depends_on:
+      - unity-catalog-server
+
+  spark-jupyter:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    container_name: spark-jupyter
+    command: start-notebook.sh --NotebookApp.token=''
+    ports:
+      - "8888:8888"
+      - "4040:4040" # Spark UI
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+      - AWS_DEFAULT_REGION=us-east-1
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    volumes:
+      - ./phase2_pipeline.ipynb:/home/jovyan/work/phase2_pipeline.ipynb
+      - ./phase3_reverse_sync.ipynb:/home/jovyan/work/phase3_reverse_sync.ipynb
+    depends_on:
+      - localstack
+      - unity-catalog-server
+      - iceberg-rest
+
+  init-resources:
+    image: amazon/aws-cli:latest
+    container_name: init-resources
+    environment:
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+    volumes:
+      - ./init.sh:/tmp/init.sh
+    entrypoint: /bin/sh -c "chmod +x /tmp/init.sh && /tmp/init.sh"
+    depends_on:
+      - localstack
