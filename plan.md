@@ -54,12 +54,12 @@ The environment will consist of a multi-container Docker setup running locally.
 1.  **Phase 2A: Originate Central Data (Mock Glue):** Initialize a Spark session configured for the Iceberg REST Catalog. Create a mock "source" table directly in this central catalog and insert dummy data.
 2.  **Phase 2B: Unity Catalog Federation Setup:** Configure Unity Catalog to create a federated connection pointing to the central catalog.
 3.  **Phase 2C: Federated Read & Manipulation (Databricks Simulator):** In Spark, query the source table *via* Unity Catalog. Perform a data transformation on the dummy data.
-4.  **Phase 2D: Write to Unity Catalog (Delta UniForm):** Write the transformed DataFrame into Unity Catalog as a new table using the `delta` format with UniForm enabled to trigger Iceberg metadata generation.
+4.  **Phase 2D: Write to Unity Catalog (Standard Delta):** Write the transformed DataFrame into Unity Catalog as a new table using the standard `delta` format and register it using the Unity Catalog REST API (bypassing OSS Spark integration bugs).
 
 ### Phase 3: The Reverse Sync to Central Catalog
-**Goal:** Synchronize the newly created Unity Catalog table back to the central catalog.
-1.  **Metadata Discovery:** Construct a script to poll the Delta table's `metadata/` directory in S3, locate the latest versioned `.metadata.json` Iceberg file.
-2.  **Catalog Registration (Reverse Sync):** Using the Iceberg REST Catalog API (or Spark stored procedures), register the `.metadata.json` file. This securely links the Unity Catalog table back into the central catalog.
+**Goal:** Synchronize the newly created Unity Catalog table back to the central catalog bypassing broken OSS Delta converters.
+1.  **Iceberg Table Creation:** Construct an empty Iceberg table in the Central Catalog (Iceberg REST) with a schema dynamically inferred from the raw Delta Parquet files.
+2.  **Parquet File Adoption (Reverse Sync):** Using the Iceberg `add_files` stored procedure, adopt the raw Parquet data files directly into the Iceberg table manifest. This securely bridges the Unity Catalog data into the central catalog without duplicating physical files.
 
 ### Phase 4: The AWS Consumer Simulator (Validation)
 **Goal:** Prove the reverse-synced data is readable from the central catalog.
@@ -74,6 +74,6 @@ The environment will consist of a multi-container Docker setup running locally.
 ## 4. Success Criteria
 * The `docker-compose` environment spins up cleanly (LocalStack, Iceberg REST, Spark, Unity Catalog).
 * The central "source" table is successfully created and readable via a federated connection.
-* The transformed data is written to Unity Catalog, and the `.metadata.json` files are physically verifiable in the LocalStack S3 bucket.
-* The reverse sync procedure successfully registers the table back to the central catalog.
+* The transformed data is written to S3 and explicitly registered in Unity Catalog.
+* The reverse sync procedure successfully adopts the physical Parquet files into the central catalog using Iceberg's native procedures.
 * The final consumer query successfully retrieves the transformed data.
