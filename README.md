@@ -2,8 +2,8 @@
 
 ![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
-![Spark](https://img.shields.io/badge/Spark-3.5.1-E25A1C?style=flat&logo=apachespark&logoColor=white)
-![Delta Lake](https://img.shields.io/badge/Delta_Lake-3.2.1-00ADD8?style=flat&logo=databricks&logoColor=white)
+![Spark](https://img.shields.io/badge/Spark-3.5.0-E25A1C?style=flat&logo=apachespark&logoColor=white)
+![Delta Lake](https://img.shields.io/badge/Delta_Lake-3.2.0-00ADD8?style=flat&logo=databricks&logoColor=white)
 ![Apache Iceberg](https://img.shields.io/badge/Apache_Iceberg-1.5.0-00ADD8?style=flat&logo=apacheiceberg&logoColor=white)
 ![Unity Catalog](https://img.shields.io/badge/Unity_Catalog-OSS-FF3621?style=flat&logo=databricks&logoColor=white)
 ![Docker](https://img.shields.io/badge/docker-%230db7ed.svg?style=flat&logo=docker&logoColor=white)
@@ -103,17 +103,17 @@ This project uses [`just`](https://github.com/casey/just) to automate common dev
 
 The pipeline executes in sequential phases to ensure structural integrity across catalogs:
 
-1. **Phase 2 (Delta -> Unity Catalog):**
-   * Mock data is generated via PySpark.
-   * Data is written to LocalStack S3 natively as standard Delta format `df.write.format("delta")`.
-   * The Spark schema is converted to Unity Catalog's expected JSON format.
+1. **Phase 2 (Delta -> Unity Catalog & CRUD Mutations):**
+   * Mock data is generated via PySpark and written natively to LocalStack S3 in Delta format.
    * The table is explicitly registered in Unity Catalog via `POST /api/2.1/unity-catalog/tables` to bypass Spark UC plugin bugs.
-2. **Phase 3 (Delta -> Iceberg Reverse Sync):**
+   * **Mutation Test:** `UPDATE` and `DELETE` operations are applied to the Delta table. 
+   * **Critical Prep:** The table is vacuumed with a `RETAIN 0 HOURS` policy to physically delete stale Parquet files orphaned by the CRUD operations, ensuring the directory exactly matches the current logical snapshot.
+2. **Phase 3 (Delta -> Iceberg On-Demand Reverse Sync):**
    * The pipeline connects to the `central_catalog` (Iceberg REST/Glue).
-   * It infers the schema directly from the underlying Parquet files written by Delta (`AS SELECT * FROM parquet... WHERE 1=0`).
+   * It drops and recreates the Iceberg table, inferring the schema directly from the underlying Parquet files (`AS SELECT * FROM parquet... WHERE 1=0`).
    * The `CALL central_catalog.system.add_files` procedure natively adopts the physical Parquet files into the Iceberg table manifest.
 3. **Phase 4 (Validation):**
-   * A simulated Athena read is executed via Spark SQL `SELECT * FROM central_catalog...` to prove end-to-end compatibility.
+   * A simulated Athena read is executed via Spark SQL `SELECT * FROM central_catalog...`. This confirms that the CRUD updates executed in Databricks are correctly reflected in the AWS Glue catalog.
 
 ## Architectural Hurdles & Bug Workarounds
 
@@ -128,6 +128,12 @@ This pipeline was designed specifically to bypass several blocking bugs and stru
    * **Context:** This is a known structural limitation corroborated by [delta-io/delta#3217](https://github.com/delta-io/delta/issues/3217).
    * **Workaround:** We completely dropped the Delta UniForm dependency (`UPGRADE UNIFORM (ICEBERG_COMPAT_VERSION=2)`). Instead, we natively construct the Iceberg table in the Central Catalog and use Iceberg's `add_files` procedure to adopt the raw Delta Parquet files.
 
+3. **The `add_files` Bridge & Zero-Retention Vacuuming Danger:**
+   * **Issue:** Because `add_files` blindly scans a directory for Parquet files and does not read the `_delta_log`, it will accidentally adopt stale, pre-update, or deleted files if they still exist in the directory. 
+   * **Workaround:** We force a `VACUUM ... RETAIN 0 HOURS` command before running the sync to clear out stale files.
+   * **Production Risk:** This workaround is **unsafe for production**. Enforcing a 0-hour retention destroys Delta Time Travel capabilities and will immediately corrupt queries for concurrent readers (throwing `FileNotFoundException` errors). This mathematically proves that a custom `add_files` bridge is not a viable long-term architecture, and managed cross-cloud catalog syncs (like Databricks native AWS Glue Sync) are required for enterprise safety.
+
+
 ## License & Copyright
 
 **Copyright (C) 2026 Rishabh Dixit. All Rights Reserved.**
@@ -137,5 +143,6 @@ See the [LICENSE.md](LICENSE.md) file for details.
 
 ## Disclaimer
 
-* **OSS UniForm Limitations:** This pipeline specifically acts as a workaround for structural limitations in OSS Delta Lake 3.2.x `IcebergConverter` when operating outside of a managed Hive Metastore. 
+* **OSS UniForm Limitations:** This pipeline specifically acts as a workaround for structural limitations in OSS Delta Lake 3.2.0 `IcebergConverter` when operating outside of a managed Hive Metastore. 
 * **Column Mapping:** Delta Column Mapping (`name` mode) must remain disabled for this `add_files` architecture to function, as Iceberg requires the physical Parquet column names to match the logical schema.
+* **Sync Model:** This POC demonstrates an **on-demand, batch full-refresh** sync model, not a continuous incremental sync. It requires dropping and re-adopting files to capture updates safely.
